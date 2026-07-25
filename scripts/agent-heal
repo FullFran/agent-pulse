@@ -27,19 +27,30 @@ command -v tmux >/dev/null 2>&1 || exit 0
 # The "-" placeholder keeps empty @agent_state fields from collapsing, because
 # splitting on tabs merges consecutive separators.
 healed=0
-while IFS=$'\t' read -r pane st vis win; do
+touched_sessions=""
+while IFS=$'\t' read -r pane st vis win ses; do
   [ "$vis" = "1" ] || continue
   case "$st" in
     blocked|error)
       tmux set-option -p -t "$pane" @agent_state idle 2>/dev/null
       tmux set-option -pu -t "$pane" @agent_msg 2>/dev/null
       ap_recompute_rollup "$win"
+      case " $touched_sessions " in
+        *" $ses "*) ;;
+        *) touched_sessions="$touched_sessions $ses" ;;
+      esac
       healed=1
       ;;
   esac
 done < <(tmux list-panes -a -F \
-  '#{pane_id}'$'\t''#{?#{@agent_state},#{@agent_state},-}'$'\t''#{&&:#{window_active},#{session_attached}}'$'\t''#{window_id}' \
+  '#{pane_id}'$'\t''#{?#{@agent_state},#{@agent_state},-}'$'\t''#{&&:#{window_active},#{session_attached}}'$'\t''#{window_id}'$'\t''#{session_name}' \
   2>/dev/null)
+
+# Window rollups changed, so their sessions have to be recomputed too. Doing it
+# once per session after the loop avoids recomputing the same session per pane.
+for ses in $touched_sessions; do
+  ap_recompute_session "$ses"
+done
 
 [ "$healed" = "1" ] && tmux refresh-client -S 2>/dev/null
 exit 0

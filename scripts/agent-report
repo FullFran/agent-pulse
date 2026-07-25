@@ -78,9 +78,11 @@ else
   tmux set-option -p -t "$pane" @agent_msg "$msg" 2>/dev/null
 fi
 
-# ── window rollup ───────────────────────────────────────────────────────────
-# A window is as urgent as its most urgent pane: error > blocked > working > idle.
-ap_recompute_rollup "$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null)"
+# ── rollups ─────────────────────────────────────────────────────────────────
+# A window is as urgent as its most urgent pane, and a session as its most
+# urgent window: error > blocked > working > idle.
+ap_recompute_rollup  "$(tmux display-message -p -t "$pane" '#{window_id}'   2>/dev/null)"
+ap_recompute_session "$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null)"
 
 # ── alert ───────────────────────────────────────────────────────────────────
 # Only on a real transition, and only when the pane is not already on screen.

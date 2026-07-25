@@ -124,6 +124,32 @@ Or set `@agent_pulse_auto_format on` before sourcing to get a plain layout.
 | `@agent_msg` | pane | optional label, e.g. the permission text |
 | `@agent_seq` | pane | monotonic sequence, internal |
 | `@win_agent_state` | window | worst state across the window's panes |
+| `@session_agent_state` | session | worst state across the session's windows |
+
+### Across sessions
+
+The tab bar answers "which window here needs me". Once you are running agents in
+several sessions, the question changes to "which of my sessions needs me at
+all", and no tab bar can answer that — the other sessions are not on screen.
+
+`agent-sessions` answers it, derived from live tmux options rather than a file
+in `/tmp`, so there is nothing to leave stale and it survives a server restart.
+
+```sh
+agent-sessions                                  # ●api ○review ◐notes
+agent-sessions --only-attention                 # just the ones that need you
+agent-sessions --format marked --only-attention # "● api", for a picker
+agent-sessions --format plain                   # "blocked<TAB>api", for scripts
+```
+
+In a status line, and in a session picker:
+
+```tmux
+set -g status-right "#(agent-sessions) | %H:%M"
+
+bind -n C-S-s display-popup -E "agent-sessions --format marked \
+  | fzf --prompt='session > ' | awk '{print \$NF}' | xargs -r tmux switch-client -t"
+```
 
 ## The hole this does not fill
 

@@ -43,6 +43,32 @@ ap_recompute_rollup() {
   fi
 }
 
+# Recompute @session_agent_state for a session as the worst state across its
+# windows.
+#
+# This is what makes a many-session workflow legible: the tab bar answers "which
+# window in THIS session needs me", and the session rollup answers "which of my
+# ten sessions needs me at all" — which is the question you actually have when
+# the session is not on screen.
+ap_recompute_session() {
+  local ses="$1" best=0 best_state="" s r
+  [ -n "$ses" ] || return 0
+
+  while read -r s; do
+    r=$(ap_rank "$s")
+    if [ "$r" -gt "$best" ]; then
+      best="$r"
+      best_state="$s"
+    fi
+  done < <(tmux list-windows -t "$ses" -F '#{@win_agent_state}' 2>/dev/null)
+
+  if [ -n "$best_state" ]; then
+    tmux set-option -t "$ses" @session_agent_state "$best_state" 2>/dev/null
+  else
+    tmux set-option -ut "$ses" @session_agent_state 2>/dev/null
+  fi
+}
+
 # True when `candidate` is strictly older than what the pane already recorded.
 #
 # Values come from `date +%s%N`, so they are 19-digit decimals. Bash arithmetic

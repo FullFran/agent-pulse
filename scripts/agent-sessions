@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# agent-sessions — list sessions by agent state.
+#
+# The tab bar answers "which window here needs me". This answers the question
+# you have when a session is not on screen at all: "which of my sessions needs
+# me?" Feed it to a status line or a session picker.
+#
+#   usage: agent-sessions [--format compact|plain|marked] [--only-attention]
+#
+#     compact          "●name ○name"   glyph-prefixed, for a status line (default)
+#     plain            "state<TAB>name" one per line, for scripts
+#     marked           "● name" / "  name" one per line, aligned, for a picker
+#     --only-attention  restrict to sessions that are blocked or errored
+#
+# State is derived from live tmux options, never from a file in /tmp. There is
+# nothing to leave stale, nothing to clean up, and it stays correct across
+# server restarts.
+set -uo pipefail
+command -v tmux >/dev/null 2>&1 || exit 0
+
+format=compact
+only_attention=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --format) format="${2:-compact}"; shift 2 ;;
+    --only-attention) only_attention=1; shift ;;
+    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) shift ;;
+  esac
+done
+
+glyph() {
+  case "$1" in
+    error)   printf '✗' ;;
+    blocked) printf '●' ;;
+    working) printf '○' ;;
+    idle)    printf '◐' ;;
+    *)       printf ' ' ;;
+  esac
+}
+
+out=""
+while IFS=$'\t' read -r name state; do
+  [ -n "$name" ] || continue
+  case "$state" in
+    error|blocked) ;;
+    working|idle)  [ "$only_attention" = "1" ] && continue ;;
+    *)             [ "$only_attention" = "1" ] && continue ;;
+  esac
+
+  case "$format" in
+    plain)  out="${out}${state:--}	${name}"$'\n' ;;
+    marked) out="${out}$(glyph "$state") ${name}"$'\n' ;;
+    *)      [ -n "$state" ] && out="${out}$(glyph "$state")${name} " ;;
+  esac
+done < <(tmux list-sessions -F '#{session_name}'$'\t''#{@session_agent_state}' 2>/dev/null)
+
+# compact is consumed inline by a status line, so it must not end with a newline.
+if [ "$format" = "compact" ]; then
+  printf '%s' "${out% }"
+else
+  printf '%s' "$out"
+fi

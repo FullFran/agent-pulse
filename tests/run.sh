@@ -102,6 +102,35 @@ heal
 check "unattended blocked survives heal" "blocked" "$(pane_state "$P1")"
 
 echo
+echo "── session rollup ──────────────────────────────────────────────────"
+ses_state() { "${TM[@]}" show-options -qv -t "$1" @session_agent_state 2>/dev/null; }
+
+report idle "" "$P1"; report idle "" "$P2"
+check "all idle" "idle" "$(ses_state t)"
+report blocked "" "$P2"
+check "one blocked pane raises the session" "blocked" "$(ses_state t)"
+
+# A second window must not mask a blocked one in the first.
+"${TM[@]}" new-window -d -t t -n w2
+P3="$("${TM[@]}" list-panes -t t:w2 -F '#{pane_id}' | head -1)"
+report working "" "$P3"
+check "second window does not lower it" "blocked" "$(ses_state t)"
+report idle "" "$P2"
+check "clearing the blocker lowers it" "working" "$(ses_state t)"
+
+echo
+echo "── agent-sessions listing ──────────────────────────────────────────"
+sessions() {
+  TMUX="$("${TM[@]}" display-message -p '#{socket_path}'),$("${TM[@]}" display-message -p '#{pid}'),0" \
+    "$ROOT/scripts/agent-sessions" "$@"
+}
+report blocked "" "$P2"
+check "compact marks a blocked session" "●t" "$(sessions)"
+check "only-attention includes it" "● t" "$(sessions --format marked --only-attention | tr -d '\n')"
+report idle "" "$P2"; report idle "" "$P3"
+check "only-attention drops calm sessions" "" "$(sessions --only-attention)"
+
+echo
 echo "── pane death cannot leak state ────────────────────────────────────"
 report blocked "" "$P2"
 "${TM[@]}" kill-pane -t "$P2" 2>/dev/null
