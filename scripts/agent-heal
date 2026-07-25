@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# agent-heal — clears attention states you have already seen.
+#
+# The event pipeline has one structural hole: some transitions emit no event at
+# all. Cancel an agent's permission prompt and no hook fires, so the pane stays
+# "blocked" forever and the tab keeps shouting at you.
+#
+# The cheap fix is to treat *looking at the pane* as the missing event. If a
+# window is on screen, its attention state has been delivered by definition, so
+# it can be cleared. This is not a substitute for screen-tail detection — it
+# recovers from missed clears, not from missed *sets* — but it costs one tmux
+# call instead of a per-agent pattern matcher, and it never guesses wrong about
+# something the user has not seen.
+#
+# Wired to navigation hooks (see tmux/agents.conf); safe to run on a timer too.
+# Prints nothing.
+set -uo pipefail
+command -v tmux >/dev/null 2>&1 || exit 0
+
+# shellcheck source=scripts/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+# Visibility here is deliberately WINDOW level, not pane level: every pane of the
+# active window is on screen at once, so a blocked background pane has been seen
+# too. Healing only the active pane would leave the tab marker stuck.
+#
+# The "-" placeholder keeps empty @agent_state fields from collapsing, because
+# splitting on tabs merges consecutive separators.
+healed=0
+while IFS=$'\t' read -r pane st vis win; do
+  [ "$vis" = "1" ] || continue
+  case "$st" in
+    blocked|error)
+      tmux set-option -p -t "$pane" @agent_state idle 2>/dev/null
+      tmux set-option -pu -t "$pane" @agent_msg 2>/dev/null
+      ap_recompute_rollup "$win"
+      healed=1
+      ;;
+  esac
+done < <(tmux list-panes -a -F \
+  '#{pane_id}'$'\t''#{?#{@agent_state},#{@agent_state},-}'$'\t''#{&&:#{window_active},#{session_attached}}'$'\t''#{window_id}' \
+  2>/dev/null)
+
+[ "$healed" = "1" ] && tmux refresh-client -S 2>/dev/null
+exit 0

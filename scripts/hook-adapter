@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# hook-adapter — Claude-Code-style hooks to canonical states.
+#
+# Covers any agent using the Claude Code hook contract (Claude Code, Codex).
+# The event name arrives as $1; the JSON payload arrives on stdin.
+#
+#   usage (from a hook command): hook-adapter <EventName>
+#
+# This is an adapter, not a policy layer: it maps vocabularies and forwards to
+# agent-report, which owns every decision about tmux.
+set -uo pipefail
+
+event="${1:-}"
+[ -n "$event" ] || exit 0
+
+# Running inside herdr? herdr ships its own integration and owns the state.
+# Two writers fighting over one pane produces flicker, so stand down.
+[ "${HERDR_ENV:-}" = "1" ] && exit 0
+
+payload="$(cat 2>/dev/null || true)"
+
+# Extract one string field from the hook payload. python3 is the only runtime
+# dependency and it is optional: without it we lose the message text, not the
+# state, so the pipeline degrades instead of breaking.
+json_field() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  printf '%s' "$payload" | python3 -c '
+import sys, json
+keys = sys.argv[1:]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for k in keys:
+    v = data.get(k)
+    if v:
+        print(v)
+        break
+' "$@" 2>/dev/null
+}
+
+# Tools whose *invocation* means the agent has stopped to ask you something.
+# PreToolUse on these is "blocked", not "working". Extend per agent as needed.
+is_blocking_tool() {
+  case "$1" in
+    AskUserQuestion|ask_user_question|request_user_input|ExitPlanMode) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+msg=""
+case "$event" in
+  PreToolUse|PostToolUse)
+    tool="$(json_field tool_name toolName)"
+    ;;
+  Notification)
+    msg="$(json_field message)"
+    ;;
+esac
+
+case "$event" in
+  PreToolUse)
+    if is_blocking_tool "${tool:-}"; then state=blocked; else state=working; fi
+    ;;
+  PostToolUse|UserPromptSubmit|PreCompact)
+    state=working
+    ;;
+  Notification)
+    # Claude reuses Notification for two unrelated things. Only the permission
+    # case actually needs you. The idle "waiting for your input" variant fires
+    # about a minute after Stop and would re-stick the pane to blocked.
+    case "$msg" in
+      *permission*|*"needs your"*|*approve*) state=blocked ;;
+      *) state=idle; msg="" ;;
+    esac
+    ;;
+  Stop|SessionEnd|TurnComplete)
+    state=idle
+    ;;
+  SessionStart)
+    state=working
+    ;;
+  *)
+    # SubagentStop lands here on purpose. A subagent finishing says nothing
+    # about the main turn, and Claude can emit it after the turn already
+    # stopped — letting it through would revive an idle pane.
+    exit 0
+    ;;
+esac
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$here/agent-report" "$state" "$msg"

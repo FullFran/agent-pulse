@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# agent-report — the normalization core.
+#
+# Every adapter (opencode, Claude Code, Codex, ...) calls THIS and nothing else.
+# It is the only place that knows about tmux. Adapters speak the canonical
+# vocabulary; this script owns the translation.
+#
+#   usage: agent-report <state> [message] [pane_id]
+#
+#   state    working | blocked | idle | error | clear   (anything else is ignored)
+#   message  optional human label, e.g. the permission prompt text
+#   pane_id  tmux pane; defaults to $TMUX_PANE, then to the pane owning this PID
+#
+# Design rules, in order of importance:
+#
+#   1. Semantic events only. Never infer "finished" from terminal silence.
+#      Agents already emit lifecycle events; we translate, we do not guess.
+#   2. Out-of-order events must not win. Every report carries a monotonic seq;
+#      a late "working" can never overwrite a newer "idle".
+#   3. State lives on the PANE, the window value is a rollup. tmux garbage
+#      collects pane options when the pane dies, so state cannot outlive its
+#      agent. A window shows the worst state among its panes.
+#   4. Never nag about something you are already looking at.
+set -uo pipefail
+
+command -v tmux >/dev/null 2>&1 || exit 0
+[ -n "${TMUX:-}" ] || exit 0
+
+# shellcheck source=scripts/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+state="${1:-}"
+msg="${2:-}"
+pane="${3:-${TMUX_PANE:-}}"
+
+[ -n "$state" ] || exit 0
+case "$state" in working|blocked|idle|error|clear) ;; *) exit 0 ;; esac
+
+# ── resolve the pane ────────────────────────────────────────────────────────
+# $TMUX_PANE covers almost every caller. A hook invoked from a detached helper
+# may not have it, so walk up the process tree and match against pane PIDs.
+if [ -z "$pane" ]; then
+  pid=$$
+  for _ in 1 2 3 4 5 6 7 8; do
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ] || break
+    match=$(tmux list-panes -a -F '#{pane_id} #{pane_pid}' 2>/dev/null \
+            | awk -v p="$pid" '$2 == p { print $1; exit }')
+    if [ -n "$match" ]; then pane="$match"; break; fi
+  done
+fi
+[ -n "$pane" ] || exit 0
+
+# Confirm the pane still exists; everything below assumes it does.
+tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || exit 0
+
+# ── monotonic sequence guard ────────────────────────────────────────────────
+# Hooks fire from independent processes, so reports can arrive out of order.
+# Wall-clock nanoseconds are monotonic enough between them. Anything older than
+# what the pane already recorded is dropped.
+seq_now=$(date +%s%N 2>/dev/null)
+case "$seq_now" in *N*|"") seq_now="$(date +%s)000000000" ;; esac  # no %N (macOS date)
+
+seq_prev=$(tmux show-options -pqv -t "$pane" @agent_seq 2>/dev/null)
+if ap_seq_is_stale "$seq_now" "$seq_prev"; then
+  exit 0
+fi
+tmux set-option -p -t "$pane" @agent_seq "$seq_now" 2>/dev/null || exit 0
+
+prev=$(tmux show-options -pqv -t "$pane" @agent_state 2>/dev/null)
+
+# ── write pane state ────────────────────────────────────────────────────────
+if [ "$state" = "clear" ]; then
+  tmux set-option -pu -t "$pane" @agent_state 2>/dev/null
+  tmux set-option -pu -t "$pane" @agent_msg 2>/dev/null
+else
+  tmux set-option -p -t "$pane" @agent_state "$state" 2>/dev/null
+  tmux set-option -p -t "$pane" @agent_msg "$msg" 2>/dev/null
+fi
+
+# ── window rollup ───────────────────────────────────────────────────────────
+# A window is as urgent as its most urgent pane: error > blocked > working > idle.
+ap_recompute_rollup "$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null)"
+
+# ── alert ───────────────────────────────────────────────────────────────────
+# Only on a real transition, and only when the pane is not already on screen.
+# "On screen" means active pane, in the active window, of an attached session.
+visible=$(tmux display-message -p -t "$pane" \
+  '#{&&:#{pane_active},#{&&:#{window_active},#{session_attached}}}' 2>/dev/null || echo 0)
+
+if [ "$state" != "$prev" ] && [ "$visible" != "1" ]; then
+  case "$(uname -s)" in
+    Darwin)
+      snd_attention="${AGENT_PULSE_SOUND_ATTENTION:-/System/Library/Sounds/Funk.aiff}"
+      snd_done="${AGENT_PULSE_SOUND_DONE:-/System/Library/Sounds/Glass.aiff}"
+      ;;
+    *)
+      snd_attention="${AGENT_PULSE_SOUND_ATTENTION:-/usr/share/sounds/freedesktop/stereo/dialog-warning.oga}"
+      snd_done="${AGENT_PULSE_SOUND_DONE:-/usr/share/sounds/freedesktop/stereo/complete.oga}"
+      ;;
+  esac
+
+  # Best effort and always non-blocking. Silence is an acceptable outcome.
+  play() {
+    [ "${AGENT_PULSE_SOUND:-1}" = "1" ] || return 0
+    [ -f "$1" ] || return 0
+    if   command -v afplay           >/dev/null 2>&1; then (afplay "$1"           >/dev/null 2>&1 &)
+    elif command -v paplay           >/dev/null 2>&1; then (paplay "$1"           >/dev/null 2>&1 &)
+    elif command -v canberra-gtk-play >/dev/null 2>&1; then (canberra-gtk-play -f "$1" >/dev/null 2>&1 &)
+    elif command -v aplay            >/dev/null 2>&1; then (aplay -q "$1"         >/dev/null 2>&1 &)
+    fi
+  }
+
+  case "$state" in
+    blocked)
+      play "$snd_attention"
+      tmux display-message -t "$pane" "#[fg=red,bold]agent needs you#[default] ${msg:-blocked}" 2>/dev/null
+      ;;
+    error)
+      play "$snd_attention"
+      tmux display-message -t "$pane" "#[fg=red,bold]agent error#[default] ${msg:-}" 2>/dev/null
+      ;;
+    idle)
+      # Only announce "done" if it was actually busy. Otherwise every session
+      # start would beep.
+      case "$prev" in
+        working|blocked|error)
+          play "$snd_done"
+          tmux display-message -t "$pane" "#[fg=green,bold]agent done#[default]" 2>/dev/null
+          ;;
+      esac
+      ;;
+  esac
+fi
+
+tmux refresh-client -S 2>/dev/null
+exit 0
