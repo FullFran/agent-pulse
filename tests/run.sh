@@ -170,6 +170,46 @@ kill "$ATTACH_PID" 2>/dev/null
 "${TM[@]}" kill-session -t seen 2>/dev/null
 
 echo
+echo "── finished panes age out when never seen ──────────────────────────"
+# No client is attached to the test server, so nothing counts as on screen and
+# only expiry can clear anything here.
+report idle "" "$P1"
+"${TM[@]}" set-option -g @agent_pulse_idle_ttl 3600
+heal
+check "fresh idle survives a long ttl" "idle" "$(pane_state "$P1")"
+
+# Backdate the sequence to fake an old report.
+"${TM[@]}" set-option -p -t "$P1" @agent_seq "$(( ($(date +%s) - 7200) ))000000000"
+heal
+check "stale idle is expired" "" "$(pane_state "$P1")"
+
+# A request that is still open must not be dropped just because it is old: an
+# agent can legitimately wait an hour for an answer.
+report blocked "" "$P1"
+"${TM[@]}" set-option -p -t "$P1" @agent_seq "$(( ($(date +%s) - 7200) ))000000000"
+heal
+check "stale blocked is kept" "blocked" "$(pane_state "$P1")"
+
+report error "" "$P1"
+"${TM[@]}" set-option -p -t "$P1" @agent_seq "$(( ($(date +%s) - 7200) ))000000000"
+heal
+check "stale error is kept" "error" "$(pane_state "$P1")"
+
+# A working agent is not finished, however long it has been going.
+report working "" "$P1"
+"${TM[@]}" set-option -p -t "$P1" @agent_seq "$(( ($(date +%s) - 7200) ))000000000"
+heal
+check "long-running working is kept" "working" "$(pane_state "$P1")"
+
+"${TM[@]}" set-option -g @agent_pulse_idle_ttl 0
+report idle "" "$P1"
+"${TM[@]}" set-option -p -t "$P1" @agent_seq "$(( ($(date +%s) - 7200) ))000000000"
+heal
+check "ttl of 0 disables expiry" "idle" "$(pane_state "$P1")"
+"${TM[@]}" set-option -gu @agent_pulse_idle_ttl
+report clear "" "$P1"
+
+echo
 echo "── pane death cannot leak state ────────────────────────────────────"
 report blocked "" "$P2"
 "${TM[@]}" kill-pane -t "$P2" 2>/dev/null
