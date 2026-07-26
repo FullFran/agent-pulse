@@ -17,6 +17,11 @@
 # forever — including long after the agent exited and the pane went back to
 # being a plain shell.
 #
+# A window you never visit is the remaining gap, so finished panes also age out
+# after @agent_pulse_idle_ttl seconds. No timer is needed for that: this walks
+# every pane on every run, so any navigation anywhere sweeps the stale markers
+# everywhere.
+#
 # Wired to navigation hooks (see tmux/agents.conf); safe to run on a timer too.
 # Prints nothing.
 set -uo pipefail
@@ -31,10 +36,40 @@ command -v tmux >/dev/null 2>&1 || exit 0
 #
 # The "-" placeholder keeps empty @agent_state fields from collapsing, because
 # splitting on tabs merges consecutive separators.
+# How long a finished pane stays marked when you never look at it. tmux options
+# are the only configuration surface this project has, which is deliberate.
+# Zero disables expiry entirely.
+#
+# Only "idle" ages out. "blocked" and "error" are requests that stay open until
+# answered — an agent can legitimately wait an hour for you, and silently
+# dropping that is worse than a stale marker.
+ttl=$(tmux show-options -gqv @agent_pulse_idle_ttl 2>/dev/null)
+case "$ttl" in ''|*[!0-9]*) ttl=1800 ;; esac
+
+now_ns=$(date +%s%N 2>/dev/null)
+case "$now_ns" in *N*|"") now_ns="$(date +%s)000000000" ;; esac
+
 healed=0
 touched_sessions=""
-while IFS=$'\t' read -r pane st vis win ses; do
-  [ "$vis" = "1" ] || continue
+while IFS=$'\t' read -r pane st vis win ses seq; do
+  if [ "$vis" != "1" ]; then
+    # Off screen: nothing has been seen, so only age can justify clearing.
+    [ "$ttl" -gt 0 ] || continue
+    [ "$st" = "idle" ] || continue
+    case "$seq" in ''|-|*[!0-9]*) continue ;; esac
+    age=$(( (now_ns - seq) / 1000000000 ))
+    [ "$age" -ge "$ttl" ] || continue
+
+    tmux set-option -pu -t "$pane" @agent_state 2>/dev/null
+    tmux set-option -pu -t "$pane" @agent_msg 2>/dev/null
+    ap_recompute_rollup "$win"
+    case " $touched_sessions " in
+      *" $ses "*) ;;
+      *) touched_sessions="$touched_sessions $ses" ;;
+    esac
+    healed=1
+    continue
+  fi
   case "$st" in
     # Every state that asks for attention, not just the loud ones. "Finished"
     # is a request to come and look, so once you have looked it is answered —
@@ -57,7 +92,7 @@ while IFS=$'\t' read -r pane st vis win ses; do
       ;;
   esac
 done < <(tmux list-panes -a -F \
-  '#{pane_id}'$'\t''#{?#{@agent_state},#{@agent_state},-}'$'\t''#{&&:#{window_active},#{session_attached}}'$'\t''#{window_id}'$'\t''#{session_name}' \
+  '#{pane_id}'$'\t''#{?#{@agent_state},#{@agent_state},-}'$'\t''#{&&:#{window_active},#{session_attached}}'$'\t''#{window_id}'$'\t''#{session_name}'$'\t''#{?#{@agent_seq},#{@agent_seq},-}' \
   2>/dev/null)
 
 # Window rollups changed, so their sessions have to be recomputed too. Doing it

@@ -124,6 +124,7 @@ Or set `@agent_pulse_auto_format on` before sourcing to get a plain layout.
 | `@agent_msg` | pane | optional label, e.g. the permission text |
 | `@agent_seq` | pane | monotonic sequence, internal |
 | `@win_agent_state` | window | worst state across the window's panes |
+| `@agent_pulse_idle_ttl` | global | seconds before a finished pane is forgotten (default 1800, 0 disables) |
 | `@session_agent_state` | session | worst state across the session's windows |
 
 ### Across sessions
@@ -160,6 +161,19 @@ at all.** Cancel a permission prompt and no hook fires, so the pane would stay
 agent-pulse treats *looking at the window* as the missing event — navigation
 hooks clear attention states you have demonstrably seen. That recovers from
 missed **clears**.
+
+Finished panes also age out. A window you never visit would otherwise keep its
+marker indefinitely, so `idle` is cleared once it is older than
+`@agent_pulse_idle_ttl` seconds (30 minutes by default, `0` disables it):
+
+```tmux
+set -g @agent_pulse_idle_ttl 900   # forget finished agents after 15 minutes
+```
+
+Only `idle` ages out. `blocked` and `error` are open requests and stay until
+answered — an agent can legitimately wait an hour for you, and dropping that
+silently is worse than a stale marker. No timer is involved: every run walks
+every pane, so any navigation anywhere sweeps stale markers everywhere.
 
 It does **not** recover from missed **sets**. If an agent dies without emitting
 anything, its pane keeps whatever it last reported. The robust fix is
