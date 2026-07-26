@@ -12,6 +12,11 @@
 # call instead of a per-agent pattern matcher, and it never guesses wrong about
 # something the user has not seen.
 #
+# It also covers the ordinary case, not just the pathological one: an agent that
+# finished leaves its pane "idle", and without this the window stays marked
+# forever — including long after the agent exited and the pane went back to
+# being a plain shell.
+#
 # Wired to navigation hooks (see tmux/agents.conf); safe to run on a timer too.
 # Prints nothing.
 set -uo pipefail
@@ -31,8 +36,17 @@ touched_sessions=""
 while IFS=$'\t' read -r pane st vis win ses; do
   [ "$vis" = "1" ] || continue
   case "$st" in
-    blocked|error)
-      tmux set-option -p -t "$pane" @agent_state idle 2>/dev/null
+    # Every state that asks for attention, not just the loud ones. "Finished"
+    # is a request to come and look, so once you have looked it is answered —
+    # exactly like a permission prompt you have now seen.
+    #
+    # The state is unset rather than downgraded. Setting blocked to idle would
+    # only trade a red marker for a yellow one, leaving the window lit after
+    # you dealt with it. "working" is deliberately left alone: an agent that is
+    # still going has not asked you for anything, and watching it work should
+    # not make the marker disappear.
+    idle|blocked|error)
+      tmux set-option -pu -t "$pane" @agent_state 2>/dev/null
       tmux set-option -pu -t "$pane" @agent_msg 2>/dev/null
       ap_recompute_rollup "$win"
       case " $touched_sessions " in
