@@ -131,6 +131,45 @@ report idle "" "$P2"; report idle "" "$P3"
 check "only-attention drops calm sessions" "" "$(sessions --only-attention)"
 
 echo
+echo "── heal clears every state you have seen ───────────────────────────"
+# Visibility needs a REAL attached client: session_attached is 0 otherwise, and
+# heal would correctly do nothing. A backgrounded `tmux attach` is not enough
+# without a tty, so borrow one from `script`.
+"${TM[@]}" new-session -d -s seen -n w1
+SP="$("${TM[@]}" list-panes -t seen:w1 -F '#{pane_id}' | head -1)"
+script -qec "tmux -L $SOCKET attach -t seen" /dev/null >/dev/null 2>&1 &
+ATTACH_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ "$("${TM[@]}" display-message -p -t seen '#{session_attached}' 2>/dev/null)" = "1" ] && break
+  sleep 0.3
+done
+if [ "$("${TM[@]}" display-message -p -t seen '#{session_attached}' 2>/dev/null)" != "1" ]; then
+  printf '  \033[33mSKIP\033[0m  could not attach a client; visibility cases not exercised\n'
+else
+
+for st in idle blocked error; do
+  report "$st" "" "$SP"
+  heal
+  check "heal clears a seen $st" "" "$(pane_state "$SP")"
+done
+
+# The regression this guards: healing blocked to idle only swapped a red marker
+# for a yellow one, so a window stayed lit after you had dealt with it.
+report blocked "" "$SP"
+heal
+check "healed blocked is not left as idle" "" "$(pane_state "$SP")"
+check "window rollup clears with it" "" "$(win_state seen:w1)"
+
+# A working agent has not asked for anything; watching it must not hide it.
+report working "" "$SP"
+heal
+check "heal leaves working alone" "working" "$(pane_state "$SP")"
+
+fi
+kill "$ATTACH_PID" 2>/dev/null
+"${TM[@]}" kill-session -t seen 2>/dev/null
+
+echo
 echo "── pane death cannot leak state ────────────────────────────────────"
 report blocked "" "$P2"
 "${TM[@]}" kill-pane -t "$P2" 2>/dev/null
