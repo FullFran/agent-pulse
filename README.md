@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" alt="agent-pulse logo" width="120" height="120"></p>
+
 # agent-pulse
 
 **Know which AI agent needs you, without hunting through panes.**
